@@ -1,0 +1,84 @@
+body {
+    font-family: Arial, sans-serif;
+    background-image: url('sa.jpg'); /* Adjust filename as per your actual image filename */
+    background-size: cover;
+    background-position: center;
+    margin: 0;
+    padding: 20px;
+    display: flex;
+    justify-content: center; /* Center horizontally */
+    align-items: center; /* Center vertically */
+    min-height: 100vh; /* Full viewport height */
+}
+
+.container {
+    display: flex;
+    flex-direction: column; /* Stack sections vertically */
+    justify-content: center; /* Center content vertically */
+    align-items: center; /* Center content horizontally */
+    max-width: 1200px;
+    margin: auto;
+    background-color: rgba(255, 255, 255, 0.9); /* Semi-transparent white background */
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+}
+
+.upload-section, .question-section {
+    width: 100%; /* Take up full width */
+    max-width: 600px; /* Limit width to improve readability */
+    margin-bottom: 20px;
+}
+
+.upload-section h2, .question-section h2 {
+    text-align: center;
+    margin-bottom: 10px;
+}
+
+.upload-section input[type=file] {
+    width: 100%;
+    padding: 10px;
+    margin-left: 8%;
+    margin-bottom: 20px;
+}
+
+.question-section textarea {
+    width: 92%;
+    padding: 10px;
+    margin-bottom: 10px;
+}
+
+.question-section button {
+    padding: 10px 20px;
+    background-color: #007bff;
+    color: #fff;
+    border: none;
+    cursor: pointer;
+    width: 100%;
+}
+
+.question-section button:hover {
+    background-color: #0056b3;
+}
+
+.output-container {
+    width: 100%; /* Take up full width */
+    max-width: 800px; /* Limit width to improve readability */
+    background-color: rgba(255, 255, 255, 0.9); /* Semi-transparent white background */
+    padding: 20px;
+    margin-top: 20px;
+    border-radius: 8px;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+}
+
+.output-container h2 {
+    text-align: center;
+    margin-bottom: 10px;
+}
+
+#output {
+    border: 1px solid #ccc;
+    padding: 10px;
+    min-height: 100px;
+    overflow-wrap: break-word;
+}
