@@ -1,8 +1,26 @@
+
+import pandas as pd
+import fitz  
+import streamlit as st
 import json
 import os
-import time
+from io import BytesIO
+import cv2
+import numpy as np
+import pytesseract
+from PIL import Image
+from pathlib import Path
 from playwright.sync_api import sync_playwright
 from concurrent.futures import ThreadPoolExecutor
+import time
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 def sanitize_filename(filename):
     """Sanitize file name by replacing invalid characters."""
@@ -11,64 +29,333 @@ def sanitize_filename(filename):
         filename = filename.replace(char, "_")
     return filename
 
-def save_as_pdf(page, file_name):
-    """Generate PDF using Playwright's built-in method."""
-    try:
-        page.pdf(path=file_name, format="A4", print_background=True)
-        print(f"Saved PDF using Playwright: {file_name}")
-    except Exception as e:
-        print(f"Failed to save PDF using Playwright: {e}")
-
 def process_link(link, output_dir, retries=3):
     """Process a single link to generate PDFs with retries."""
+    logger.info(f"Processing link: {link}")
     attempt = 0
     while attempt < retries:
         try:
             with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)  # Headless mode enabled
-                page = browser.new_page()
-                page.goto(link, wait_until="domcontentloaded", timeout=60000)
-
-                # Generate filenames
-                page_title = sanitize_filename(page.title().replace(" ", "_"))
-                file_name_save_as_pdf = os.path.join(output_dir, f"{page_title}_save_as_pdf.pdf")
-
-                # Save as PDF
-                save_as_pdf(page, file_name_save_as_pdf)
-
-                browser.close()
-                break  # Exit loop if the link was successfully processed
+                # Launch browser with specific arguments for better PDF generation
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=['--no-sandbox', '--disable-setuid-sandbox']
+                )
+                context = browser.new_context(
+                    viewport={'width': 1920, 'height': 1080}
+                )
+                page = context.new_page()
+                
+                # Add error handling for navigation
+                try:
+                    logger.info(f"Navigating to: {link}")
+                    response = page.goto(link, wait_until="networkidle", timeout=60000)
+                    if not response or not response.ok:
+                        raise Exception(f"Failed to load page: {response.status if response else 'No response'}")
+                except Exception as e:
+                    logger.error(f"Navigation failed: {str(e)}")
+                    raise
+                
+                # Wait for content to load
+                page.wait_for_load_state("domcontentloaded")
+                
+                # Get page title with fallback
+                try:
+                    page_title = page.title()
+                    if not page_title:
+                        page_title = f"page_{int(time.time())}"
+                except:
+                    page_title = f"page_{int(time.time())}"
+                
+                logger.info(f"Page title: {page_title}")
+                safe_title = sanitize_filename(page_title.replace(" ", "_"))
+                
+                # Create absolute file path
+                file_path = os.path.join(output_dir, f"{safe_title}.pdf")
+                logger.info(f"Saving PDF to: {file_path}")
+                
+                # Enhanced PDF saving with options
+                try:
+                    page.pdf(path=file_path, 
+                            format="A4",
+                            print_background=True,
+                            margin={"top": "0.5in", "right": "0.5in", "bottom": "0.5in", "left": "0.5in"})
+                except Exception as e:
+                    logger.error(f"PDF generation failed: {str(e)}")
+                    raise
+                
+                # Verify file exists and has content
+                if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                    logger.info(f"Successfully saved PDF: {file_path} ({os.path.getsize(file_path)} bytes)")
+                    context.close()
+                    browser.close()
+                    return file_path
+                else:
+                    raise Exception(f"PDF file not created or empty: {file_path}")
+                
         except Exception as e:
-            print(f"Error processing {link} (Attempt {attempt + 1}): {e}")
+            logger.error(f"Error processing {link} (Attempt {attempt + 1}): {str(e)}")
             attempt += 1
             if attempt >= retries:
-                print(f"Failed to process {link} after {retries} attempts.")
+                logger.error(f"Failed to process {link} after {retries} attempts.")
+            time.sleep(2)
+    
+    return None
 
-def load_links_from_json(file_path):
-    """Load links from a JSON file."""
-    with open(file_path, 'r') as f:
-        data = json.load(f)
-        if not isinstance(data, dict) or 'links' not in data or not isinstance(data['links'], list):
-            raise ValueError("JSON must contain a 'links' key with a list of URLs.")
-        return data['links']
+def detect_fonts_with_ocr(pdf_file):
+    """Analyze fonts in PDF using OCR."""
+    doc = fitz.open(pdf_file)
+    font_analysis = {
+        'total_pages': len(doc),
+        'small_fonts': 0,
+        'large_fonts': 0,
+        'total_text_elements': 0,
+        'pages_font_details': []
+    }
+    
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        pix = page.get_pixmap()
+        img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        
+        opencv_image = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+        gray = cv2.cvtColor(opencv_image, cv2.COLOR_BGR2GRAY)
+        thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
+        
+        details = pytesseract.image_to_data(
+            thresh, 
+            output_type=pytesseract.Output.DICT,
+            config='--psm 6 -c preserve_interword_spaces=1'
+        )
+        
+        page_font_details = {
+            'page_number': page_num + 1,
+            'small_fonts': 0,
+            'large_fonts': 0,
+            'total_text_elements': 0
+        }
+        
+        for font_size in details['height']:
+            if 5 < font_size < 100:
+                page_font_details['total_text_elements'] += 1
+                font_analysis['total_text_elements'] += 1
+                
+                if font_size < 10:
+                    page_font_details['small_fonts'] += 1
+                    font_analysis['small_fonts'] += 1
+                else:
+                    page_font_details['large_fonts'] += 1
+                    font_analysis['large_fonts'] += 1
+        
+        font_analysis['pages_font_details'].append(page_font_details)
+    
+    total_text_elements = font_analysis['total_text_elements']
+    if total_text_elements:
+        font_analysis['small_fonts_percentage'] = (font_analysis['small_fonts'] / total_text_elements * 100)
+        font_analysis['large_fonts_percentage'] = (font_analysis['large_fonts'] / total_text_elements * 100)
+    else:
+        font_analysis['small_fonts_percentage'] = 0
+        font_analysis['large_fonts_percentage'] = 0
+    
+    return font_analysis
 
-def process_links_in_batches(links, batch_size, output_dir):
-    """Process links in smaller batches to avoid overload."""
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        for i in range(0, len(links), batch_size):
-            batch = links[i:i + batch_size]
-            executor.map(lambda link: process_link(link, output_dir), batch)
+def calculate_page_margins(page):
+    """Calculate margins for a PDF page."""
+    text_instances = page.get_text("dict")["blocks"]
+    images = page.get_images(full=True)
+
+    if not text_instances and not images:
+        return {"top": 0, "bottom": 0, "left": 0, "right": 0}
+
+    top_margin = page.rect.height
+    bottom_margin = 0
+    left_margin = page.rect.width
+    right_margin = 0
+
+    for block in text_instances:
+        if block["type"] == 0:
+            for line in block["lines"]:
+                for span in line["spans"]:
+                    top_margin = min(top_margin, span["bbox"][1])
+                    bottom_margin = max(bottom_margin, span["bbox"][3])
+                    left_margin = min(left_margin, span["bbox"][0])
+                    right_margin = max(right_margin, span["bbox"][2])
+
+    if top_margin == page.rect.height:
+        top_margin = 0
+    if bottom_margin == 0:
+        bottom_margin = page.rect.height
+    if left_margin == page.rect.width:
+        left_margin = 0
+    if right_margin == 0:
+        right_margin = page.rect.width
+
+    return {
+        "top": round(top_margin / 72, 2),
+        "bottom": round(bottom_margin / 72, 2),
+        "left": round(left_margin / 72, 2),
+        "right": round(right_margin / 72, 2),
+        "image_count": len(images)
+    }
+
+@st.cache_data(show_spinner=False)
+def extract_pdf_text(pdf_file):
+    """Extract text from PDF with OCR fallback."""
+    doc = fitz.open(pdf_file)
+    all_text = []
+    for page_number, page in enumerate(doc):
+        text = page.get_text("text")
+        if not text:
+            pix = page.get_pixmap()
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            text = pytesseract.image_to_string(img)
+        all_text.append({
+            "page_number": page_number + 1,
+            "content": text
+        })
+    return all_text
+
+@st.cache_data(show_spinner=False)
+def parse_pdf_to_json(pdf_file):
+    """Parse PDF content to JSON format."""
+    if isinstance(pdf_file, list):
+        pdf_file = pdf_file[0]
+    
+    doc = fitz.open(pdf_file)
+    result = []
+    
+    for page_number, page in enumerate(doc):
+        text = page.get_text("text")
+        page_data = {
+            "page_number": page_number + 1,
+            "text": text.strip()
+        }
+        result.append(page_data)
+        
+    return json.dumps(result, indent=4)
+
+def calculate_text_and_image_percentage_from_json(json_data, pdf_file):
+    """Calculate text and image percentages for each page."""
+    page_data_list = []
+    font_analysis = detect_fonts_with_ocr(pdf_file)
+
+    for idx, page_data in enumerate(json_data.get('pages', [])):
+        page_number = page_data.get('page_number')
+        content = page_data.get('text', "")
+        
+        doc = fitz.open(pdf_file)
+        page_margins = calculate_page_margins(doc[page_number - 1])
+        image_count = page_margins["image_count"]
+
+        text_length = len(content)
+        total_content = text_length + image_count * 1000
+        text_percentage = (text_length / total_content * 100) if total_content else 0
+        image_percentage = (image_count * 1000 / total_content * 100) if total_content else 0
+
+        page_font_details = font_analysis['pages_font_details'][idx] if idx < len(font_analysis['pages_font_details']) else {}
+        total_text_elements = page_font_details.get('total_text_elements', 1) or 1
+
+        page_data_list.append({
+            "page_number": page_number,
+            "text_percentage": f"{text_percentage:.2f}%",
+            "image_percentage": f"{image_percentage:.2f}%",
+            "small_fonts_percentage": f"{(page_font_details.get('small_fonts', 0) / total_text_elements * 100):.2f}%",
+            "large_fonts_percentage": f"{(page_font_details.get('large_fonts', 0) / total_text_elements * 100):.2f}%",
+            "margins": page_margins
+        })
+
+    return page_data_list
 
 def main():
-    json_file_path = "cat.json"
-    output_dir = "output_pdfs"  # Directory to save PDFs
+    st.title("PDF Generator and Analyzer")
+    
+    # Create output directory with full path
+    output_dir = os.path.abspath("output_pdfs")
     os.makedirs(output_dir, exist_ok=True)
+    logger.info(f"Output directory: {output_dir}")
+    
+    # Step 1: Generate PDFs from links
+    st.header("Step 1: Generate PDFs from Links")
+    
+    # Add file uploader for JSON
+    uploaded_file = st.file_uploader("Upload links.json file", type=['json'])
+    
+    if uploaded_file is not None:
+        try:
+            links = json.load(uploaded_file)['links']
+            st.write(f"Loaded {len(links)} links.")
+            
+            if st.button("Generate PDFs from Links"):
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                successful_saves = []
+                for i, link in enumerate(links):
+                    status_text.text(f"Processing link {i+1}/{len(links)}: {link}")
+                    result = process_link(link, output_dir)
+                    if result:
+                        successful_saves.append(result)
+                    progress_bar.progress((i + 1) / len(links))
+                
+                status_text.text("Processing complete!")
+                
+                # Show results
+                st.write("Generated PDFs:")
+                for file_path in successful_saves:
+                    st.write(f"- {file_path}")
+                
+                # List actual files in directory
+                actual_files = [f for f in os.listdir(output_dir) if f.endswith('.pdf')]
+                st.write(f"\nFiles in output directory ({output_dir}):")
+                for file_name in actual_files:
+                    st.write(f"- {file_name}")
+                
+                if successful_saves:
+                    st.success(f"Successfully generated {len(successful_saves)} PDFs!")
+                else:
+                    st.warning("No PDFs were generated successfully.")
 
-    links = load_links_from_json(json_file_path)
-    print(f"Loaded {len(links)} links.")
+                # Step 2: Analyze Generated PDFs
+                st.header("Step 2: Analyze Generated PDFs")
+                st.write("Processing PDFs from the output directory...")
+                
+                if actual_files:
+                    if st.button("Analyze PDFs"):
+                        json_outputs = {}
 
-    # Process the links in batches of 10 for efficiency
-    process_links_in_batches(links, batch_size=10, output_dir=output_dir)
+                        for pdf_file in actual_files:
+                            full_path = os.path.join(output_dir, pdf_file)
+                            st.write(f"Processing {pdf_file}...")
+                            
+                            all_text = extract_pdf_text(full_path)
+                            json_str_output = parse_pdf_to_json(full_path)
+                            
+                            json_dict_output = {
+                                'pages': json.loads(json_str_output),
+                                'pages_info': []
+                            }
+
+                            page_data_list = calculate_text_and_image_percentage_from_json(json_dict_output, full_path)
+                            json_dict_output['pages_info'] = page_data_list
+                            
+                            json_outputs[pdf_file] = json_dict_output
+
+                        for pdf_filename, json_data in json_outputs.items():
+                            st.write(f"Results for {pdf_filename}:")
+                            st.json(json_data)
+
+                            json_file = os.path.join(output_dir, f"{os.path.splitext(pdf_filename)[0]}_metadata.json")
+                            with open(json_file, "w") as f:
+                                json.dump(json_data, f, indent=4)
+                            st.success(f"Saved JSON metadata to {json_file}")
+                else:
+                    st.warning("No PDF files found to analyze.")
+        
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
+            logger.error(f"Error in main function: {str(e)}", exc_info=True)
+    else:
+        st.info("Please upload a links.json file to begin.")
 
 if __name__ == "__main__":
     main()
